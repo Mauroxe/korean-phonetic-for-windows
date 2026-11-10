@@ -1,0 +1,1 @@
+# korean-phonetic-for-windows
