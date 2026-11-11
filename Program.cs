@@ -100,50 +100,44 @@ static class Program
     static void Main(string[] args)
     {
         using var mutex = new Mutex(true, "KoPhonetic-Windows-Single", out bool created);
-        if (!created) return;
+        var showEvt = new EventWaitHandle(false, EventResetMode.AutoReset, "KoPhonetic-Windows-Show");
+        if (!created) { showEvt.Set(); return; }
         Native.SetProcessDPIAware();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         // Arranque automático com o Windows (--auto) começa desligado, para não interferir
-        Application.Run(new TrayContext(!args.Contains("--auto")));
+        bool auto = args.Contains("--auto");
+        Application.Run(new TrayContext(!auto, !auto, showEvt));
     }
 }
 
-// Janela pequena, sempre visível e que não rouba o foco, com o layout das teclas
-sealed class LayoutForm : Form
+// Desenha as teclas do layout (a azul, o que sai com Shift) e acende a tecla premida
+sealed class LayoutPanel : Control
 {
     static readonly string[] Rows = { "qwertyuiop", "asdfghjkl", "zxcvbnm" };
+    readonly HashSet<char> lit = new HashSet<char>();
+    readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 160 };
 
-    public LayoutForm()
+    public LayoutPanel()
     {
-        Text = "ko-phonetic";
-        FormBorderStyle = FormBorderStyle.FixedToolWindow;
-        TopMost = true;
-        ShowInTaskbar = false;
         DoubleBuffered = true;
+        ResizeRedraw = true;
         BackColor = Color.White;
-        ClientSize = new Size(540, 180);
-        StartPosition = FormStartPosition.Manual;
-        var wa = Screen.PrimaryScreen.WorkingArea;
-        Location = new Point(wa.Right - Width - 16, wa.Bottom - Height - 16);
+        timer.Tick += (s, e) => { timer.Stop(); lit.Clear(); Invalidate(); };
     }
 
-    protected override bool ShowWithoutActivation => true;
-
-    protected override CreateParams CreateParams
+    public void Flash(char c)
     {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE
-            return cp;
-        }
+        lit.Add(char.ToLowerInvariant(c));
+        Invalidate();
+        timer.Stop();
+        timer.Start();
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    protected override void Dispose(bool disposing)
     {
-        if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
-        base.OnFormClosing(e);
+        if (disposing) timer.Dispose();
+        base.Dispose(disposing);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -151,11 +145,16 @@ sealed class LayoutForm : Form
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-        using var fs = new Font("Segoe UI", 8f);
-        using var fj = new Font("Malgun Gothic", 15f, FontStyle.Bold);
-        using var fu = new Font("Malgun Gothic", 8f);
+        float kw = Math.Min(64f, (Width - 16f) / 10f);
+        float kh = Math.Min(kw * 1.1f, (Height - 16f) / 3f);
+        if (kw < 10f || kh < 10f) return;
+        float x0 = (Width - 10 * kw) / 2f, y0 = 8f;
+        using var fs = new Font("Segoe UI", kh * 0.18f, GraphicsUnit.Pixel);
+        using var fj = new Font("Malgun Gothic", kh * 0.36f, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var fu = new Font("Malgun Gothic", kh * 0.18f, GraphicsUnit.Pixel);
         using var pen = new Pen(Color.Silver);
         using var cap = new SolidBrush(Color.FromArgb(245, 246, 248));
+        using var hot = new SolidBrush(Color.FromArgb(207, 216, 255));
         using var ink = new SolidBrush(Color.FromArgb(30, 36, 48));
         using var mute = new SolidBrush(Color.Gray);
         using var acc = new SolidBrush(Color.FromArgb(47, 75, 208));
@@ -165,15 +164,86 @@ sealed class LayoutForm : Form
             for (int i = 0; i < Rows[r].Length; i++)
             {
                 char ch = Rows[r][i];
-                var rc = new Rectangle(8 + r * 26 + i * 52, 8 + r * 56, 48, 52);
-                g.FillRectangle(cap, rc);
-                g.DrawRectangle(pen, rc);
+                var rc = new RectangleF(x0 + r * 0.5f * kw + i * kw + 2, y0 + r * kh + 2, kw - 4, kh - 4);
+                g.FillRectangle(lit.Contains(ch) ? hot : cap, rc);
+                g.DrawRectangle(pen, rc.X, rc.Y, rc.Width, rc.Height);
                 g.DrawString(ch.ToString(), fs, mute, rc.X + 4, rc.Y + 2);
-                g.DrawString(Engine.Jamo(ch), fj, ink, new Rectangle(rc.X, rc.Y + 8, rc.Width, rc.Height - 8), center);
+                g.DrawString(Engine.Jamo(ch), fj, ink,
+                    new RectangleF(rc.X, rc.Y + kh * 0.12f, rc.Width, rc.Height - kh * 0.12f), center);
                 string up = Engine.Jamo(char.ToUpperInvariant(ch));
-                if (up != "") g.DrawString(up, fu, acc, rc.Right - 16, rc.Y + 3);
+                if (up != "") g.DrawString(up, fu, acc, rc.Right - kh * 0.30f, rc.Y + 2);
             }
         }
+        float capY = y0 + 3 * kh + 2;
+        if (Height - capY > 16f)
+            g.DrawString("Azul = com Shift. A tecla premida acende.", fs, mute, x0, capY);
+    }
+}
+
+// Janela aberta ao clicar no ícone: área para testar a escrita e, por baixo, as teclas
+sealed class MainForm : Form
+{
+    readonly Label mode = new Label();
+    readonly TextBox box = new TextBox();
+    readonly LayoutPanel keys = new LayoutPanel();
+
+    public MainForm()
+    {
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        Text = "ko-phonetic";
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(600, 440);
+        MinimumSize = new Size(420, 340);
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        box.Multiline = true;
+        box.Dock = DockStyle.Fill;
+        box.ScrollBars = ScrollBars.Vertical;
+        box.AcceptsReturn = true;
+        box.Font = new Font("Malgun Gothic", 18f);
+
+        keys.Dock = DockStyle.Bottom;
+        keys.Height = 200;
+
+        mode.Dock = DockStyle.Top;
+        mode.Height = 40;
+        mode.TextAlign = ContentAlignment.MiddleLeft;
+        mode.Padding = new Padding(12, 0, 0, 0);
+        mode.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+        mode.ForeColor = Color.White;
+
+        Controls.Add(box);
+        Controls.Add(keys);
+        Controls.Add(mode);
+    }
+
+    public void SetMode(bool hangul)
+    {
+        mode.Text = hangul ? "한  Hangul  —  toque em AltGr para voltar ao Latin"
+                           : "A  Latin  —  toque em AltGr para escrever em Hangul";
+        mode.BackColor = hangul ? Color.FromArgb(47, 75, 208) : Color.FromArgb(110, 110, 110);
+    }
+
+    public void FlashKey(char c)
+    {
+        if (Visible) keys.Flash(c);
+    }
+
+    public void Bring()
+    {
+        if (!Visible) Show();
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        TopMost = true;
+        TopMost = false;
+        Activate();
+        box.Focus();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+        base.OnFormClosing(e);
     }
 }
 
@@ -189,29 +259,28 @@ sealed class TrayContext : ApplicationContext
     readonly IntPtr kbHook, msHook;
     readonly HashSet<uint> swallowed = new();
     readonly ToolStripMenuItem miOn;
-    readonly LayoutForm layout = new();
+    readonly MainForm main = new MainForm();
+    readonly Control inv = new Control();
+    readonly EventWaitHandle showEvt;
     bool enabled;
-    bool toggleHeld;
+    bool altgrHeld, altgrTap;   // AltGr = Alt direito
 
-    public TrayContext(bool startOn)
+    public TrayContext(bool startOn, bool showWindow, EventWaitHandle showEvt)
     {
         enabled = startOn;
+        this.showEvt = showEvt;
         eng.Emit = Native.Send;
         iconOn = MakeIcon(Color.FromArgb(47, 75, 208), "한");
         iconOff = MakeIcon(Color.FromArgb(110, 110, 110), "A");
 
         var menu = new ContextMenuStrip();
-        miOn = new ToolStripMenuItem("Ativado (Scroll Lock ou tecla 한/영)");
+        miOn = new ToolStripMenuItem("Escrever em Hangul (toque em AltGr)");
         miOn.Click += (s, e) => Toggle();
         menu.Items.Add(miOn);
 
-        var miLayout = new ToolStripMenuItem("Mostrar layout");
-        miLayout.Click += (s, e) =>
-        {
-            if (layout.Visible) layout.Hide(); else layout.Show();
-            miLayout.Checked = layout.Visible;
-        };
-        menu.Items.Add(miLayout);
+        var miWin = new ToolStripMenuItem("Abrir janela de teste") { Font = new Font(SystemFonts.MenuFont, FontStyle.Bold) };
+        miWin.Click += (s, e) => ShowMain();
+        menu.Items.Add(miWin);
 
         var miRun = new ToolStripMenuItem("Iniciar com o Windows") { Checked = IsAutorun() };
         miRun.Click += (s, e) => { SetAutorun(!miRun.Checked); miRun.Checked = IsAutorun(); };
@@ -224,6 +293,7 @@ sealed class TrayContext : ApplicationContext
 
         ni.ContextMenuStrip = menu;
         ni.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Toggle(); };
+        ni.DoubleClick += (s, e) => ShowMain();
         UpdateUi();
         ni.Visible = true;
 
@@ -236,10 +306,21 @@ sealed class TrayContext : ApplicationContext
             MessageBox.Show("Não foi possível instalar o hook de teclado.", "ko-phonetic",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
 
+        if (!showWindow)
         ni.ShowBalloonTip(3000, "ko-phonetic",
-            enabled ? "Ativo. Scroll Lock ou clique no ícone para ligar/desligar."
-                    : "Desligado. Scroll Lock ou clique no ícone para ativar.",
+            enabled ? "Hangul ativo. Toque em AltGr para voltar ao Latin."
+                    : "Modo Latin. Toque em AltGr para escrever em Hangul.",
             ToolTipIcon.Info);
+
+        var h = inv.Handle;   // cria o handle (necessário para BeginInvoke a partir de outra thread)
+        ThreadPool.RegisterWaitForSingleObject(showEvt,
+            (st, timedOut) => inv.BeginInvoke(new Action(ShowMain)), null, -1, false);
+        if (showWindow) ShowMain();
+    }
+
+    void ShowMain()
+    {
+        main.Bring();
     }
 
     void Toggle()
@@ -252,8 +333,9 @@ sealed class TrayContext : ApplicationContext
     void UpdateUi()
     {
         ni.Icon = enabled ? iconOn : iconOff;
-        ni.Text = enabled ? "ko-phonetic: ativo" : "ko-phonetic: desativado";
+        ni.Text = enabled ? "ko-phonetic: Hangul (AltGr alterna)" : "ko-phonetic: Latin (AltGr alterna)";
         miOn.Checked = enabled;
+        main.SetMode(enabled);
     }
 
     void Quit()
@@ -262,7 +344,8 @@ sealed class TrayContext : ApplicationContext
         Native.UnhookWindowsHookEx(msHook);
         ni.Visible = false;
         ni.Dispose();
-        layout.Dispose();
+        main.Dispose();
+        inv.Dispose();
         ExitThread();
     }
 
@@ -290,12 +373,17 @@ sealed class TrayContext : ApplicationContext
 
     bool HandleKey(uint vk, bool down, bool up)
     {
-        if (vk == 0x91 || vk == 0x15)   // Scroll Lock ou 한/영 ligam/desligam
+        if (vk == 0xA5)   // AltGr (Alt direito): um toque sozinho alterna Latin <-> Hangul
         {
-            if (down && !toggleHeld) { toggleHeld = true; Toggle(); }
-            if (up) toggleHeld = false;
-            return false;
+            if (down) { if (!altgrHeld) { altgrHeld = true; altgrTap = true; } }
+            else if (up)
+            {
+                if (altgrHeld && altgrTap) Toggle();
+                altgrHeld = false; altgrTap = false;
+            }
+            return false;   // a tecla passa sempre, para não estragar AltGr+tecla (@, €, etc.)
         }
+        if (down && altgrHeld && !IsModifier(vk)) altgrTap = false;   // AltGr usado em combinação
 
         if (swallowed.Contains(vk))
         {
@@ -317,6 +405,7 @@ sealed class TrayContext : ApplicationContext
             bool upper = Held(0x10) ^ Control.IsKeyLocked(Keys.CapsLock);
             swallowed.Add(vk);
             eng.Type((char)vk, upper);
+            main.FlashKey((char)vk);
             return true;
         }
         if (vk == 0x08)   // Backspace: apaga um jamo de cada vez
