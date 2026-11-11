@@ -12,19 +12,26 @@ UninstallDisplayName=ko-phonetic
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=app.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+#if FileExists(CompilerPath + "Languages\Portuguese.isl")
+Name: "portuguese"; MessagesFile: "compiler:Languages\Portuguese.isl"
+#else
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
+#endif
 
 [Tasks]
+Name: "desktopicon"; Description: "Criar um atalho no ambiente de trabalho"
 Name: "autostart"; Description: "Iniciar com o Windows (arranca desligado)"; Flags: unchecked
 
 [Files]
 Source: "bin\Release\net462\KoPhonetic.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\ko-phonetic"; Filename: "{app}\KoPhonetic.exe"
+Name: "{autoprograms}\ko-phonetic"; Filename: "{app}\KoPhonetic.exe"; IconFilename: "{app}\KoPhonetic.exe"
+Name: "{autodesktop}\ko-phonetic"; Filename: "{app}\KoPhonetic.exe"; IconFilename: "{app}\KoPhonetic.exe"; Tasks: desktopicon
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "KoPhoneticWin"; ValueData: """{app}\KoPhonetic.exe"" --auto"; Tasks: autostart
